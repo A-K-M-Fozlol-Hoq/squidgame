@@ -16,6 +16,7 @@ document.body.appendChild(renderer.domElement);
 // scene.add(cube);
 
 camera.position.z = 5;
+const loader = new THREE.GLTFLoader();
 function animate() {
   renderer.render(scene, camera);
   // cube.rotation.x += 0.01;
