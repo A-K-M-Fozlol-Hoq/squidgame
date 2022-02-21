@@ -234,6 +234,13 @@
       parser.setPlugins(plugins);
       parser.parse(onLoad, onError);
     }
+
+    parseAsync(data, path) {
+      const scope = this;
+      return new Promise(function (resolve, reject) {
+        scope.parse(data, path, resolve, reject);
+      });
+    }
   }
   /* GLTFREGISTRY */
 
@@ -544,18 +551,38 @@
       }
 
       const pending = [];
-      materialParams.sheenTint = new THREE.Color(0, 0, 0);
+      materialParams.sheenColor = new THREE.Color(0, 0, 0);
       materialParams.sheenRoughness = 0;
       materialParams.sheen = 1;
       const extension = materialDef.extensions[this.name];
 
       if (extension.sheenColorFactor !== undefined) {
-        materialParams.sheenTint.fromArray(extension.sheenColorFactor);
+        materialParams.sheenColor.fromArray(extension.sheenColorFactor);
       }
 
       if (extension.sheenRoughnessFactor !== undefined) {
         materialParams.sheenRoughness = extension.sheenRoughnessFactor;
-      } // TODO sheenColorTexture and sheenRoughnessTexture
+      }
+
+      if (extension.sheenColorTexture !== undefined) {
+        pending.push(
+          parser.assignTexture(
+            materialParams,
+            'sheenColorMap',
+            extension.sheenColorTexture
+          )
+        );
+      }
+
+      if (extension.sheenRoughnessTexture !== undefined) {
+        pending.push(
+          parser.assignTexture(
+            materialParams,
+            'sheenRoughnessMap',
+            extension.sheenRoughnessTexture
+          )
+        );
+      }
 
       return Promise.all(pending);
     }
@@ -654,7 +681,7 @@
 
       materialParams.attenuationDistance = extension.attenuationDistance || 0;
       const colorArray = extension.attenuationColor || [1, 1, 1];
-      materialParams.attenuationTint = new THREE.Color(
+      materialParams.attenuationColor = new THREE.Color(
         colorArray[0],
         colorArray[1],
         colorArray[2]
@@ -739,7 +766,7 @@
       }
 
       const colorArray = extension.specularColorFactor || [1, 1, 1];
-      materialParams.specularTint = new THREE.Color(
+      materialParams.specularColor = new THREE.Color(
         colorArray[0],
         colorArray[1],
         colorArray[2]
@@ -750,7 +777,7 @@
           parser
             .assignTexture(
               materialParams,
-              'specularTintMap',
+              'specularColorMap',
               extension.specularColorTexture
             )
             .then(function (texture) {
@@ -784,7 +811,6 @@
       }
 
       const extension = textureDef.extensions[this.name];
-      const source = json.images[extension.source];
       const loader = parser.options.ktx2Loader;
 
       if (!loader) {
@@ -801,7 +827,7 @@
         }
       }
 
-      return parser.loadTextureImage(textureIndex, source, loader);
+      return parser.loadTextureImage(textureIndex, extension.source, loader);
     }
   }
   /**
@@ -1107,7 +1133,7 @@
   /**
    * Specular-Glossiness Extension
    *
-   * Specification: https://github.com/KhronosGroup/glTF/tree/master/extensions/2.0/Khronos/KHR_materials_pbrSpecularGlossiness
+   * Specification: https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Archived/KHR_materials_pbrSpecularGlossiness
    */
 
   /**
@@ -1135,7 +1161,6 @@
         'vec3 specularFactor = specular;',
         '#ifdef USE_SPECULARMAP',
         '	vec4 texelSpecular = texture2D( specularMap, vUv );',
-        '	texelSpecular = sRGBToLinear( texelSpecular );',
         '	// reads channel RGB, compatible with a glTF Specular-Glossiness (RGBA) texture',
         '	specularFactor *= texelSpecular.rgb;',
         '#endif',
@@ -1575,24 +1600,6 @@
     MASK: 'MASK',
     BLEND: 'BLEND',
   };
-  /* UTILITY FUNCTIONS */
-
-  function resolveURL(url, path) {
-    // Invalid URL
-    if (typeof url !== 'string' || url === '') return ''; // Host Relative URL
-
-    if (/^https?:\/\//i.test(path) && /^\//.test(url)) {
-      path = path.replace(/(^https?:\/\/[^\/]+).*/i, '$1');
-    } // Absolute URL http://,https://,//
-
-    if (/^(https?:)?\/\//i.test(url)) return url; // Data URI
-
-    if (/^data:.*,.*$/i.test(url)) return url; // Blob URL
-
-    if (/^blob:.*$/i.test(url)) return url; // Relative URL
-
-    return path + url;
-  }
   /**
    * Specification: https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#default-material
    */
@@ -1811,6 +1818,7 @@
         refs: {},
         uses: {},
       };
+      this.sourceCache = {};
       this.textureCache = {}; // Track node names, to ensure no duplicates
 
       this.nodeNamesUsed = {}; // Use an THREE.ImageBitmapLoader if imageBitmaps are supported. Moves much of the
@@ -1818,7 +1826,8 @@
 
       if (
         typeof createImageBitmap !== 'undefined' &&
-        /Firefox/.test(navigator.userAgent) === false
+        /Firefox|^((?!chrome|android).)*safari/i.test(navigator.userAgent) ===
+          false
       ) {
         this.textureLoader = new THREE.ImageBitmapLoader(this.options.manager);
       } else {
@@ -2123,7 +2132,7 @@
       const options = this.options;
       return new Promise(function (resolve, reject) {
         loader.load(
-          resolveURL(bufferDef.uri, options.path),
+          THREE.LoaderUtils.resolveURL(bufferDef.uri, options.path),
           resolve,
           undefined,
           function () {
@@ -2317,81 +2326,33 @@
       const json = this.json;
       const options = this.options;
       const textureDef = json.textures[textureIndex];
-      const source = json.images[textureDef.source];
+      const sourceIndex = textureDef.source;
+      const sourceDef = json.images[sourceIndex];
       let loader = this.textureLoader;
 
-      if (source.uri) {
-        const handler = options.manager.getHandler(source.uri);
+      if (sourceDef.uri) {
+        const handler = options.manager.getHandler(sourceDef.uri);
         if (handler !== null) loader = handler;
       }
 
-      return this.loadTextureImage(textureIndex, source, loader);
+      return this.loadTextureImage(textureIndex, sourceIndex, loader);
     }
 
-    loadTextureImage(textureIndex, source, loader) {
+    loadTextureImage(textureIndex, sourceIndex, loader) {
       const parser = this;
       const json = this.json;
-      const options = this.options;
       const textureDef = json.textures[textureIndex];
+      const sourceDef = json.images[sourceIndex];
       const cacheKey =
-        (source.uri || source.bufferView) + ':' + textureDef.sampler;
+        (sourceDef.uri || sourceDef.bufferView) + ':' + textureDef.sampler;
 
       if (this.textureCache[cacheKey]) {
         // See https://github.com/mrdoob/three.js/issues/21559.
         return this.textureCache[cacheKey];
       }
 
-      const URL = self.URL || self.webkitURL;
-      let sourceURI = source.uri || '';
-      let isObjectURL = false;
-
-      if (source.bufferView !== undefined) {
-        // Load binary image data from bufferView, if provided.
-        sourceURI = parser
-          .getDependency('bufferView', source.bufferView)
-          .then(function (bufferView) {
-            isObjectURL = true;
-            const blob = new Blob([bufferView], {
-              type: source.mimeType,
-            });
-            sourceURI = URL.createObjectURL(blob);
-            return sourceURI;
-          });
-      } else if (source.uri === undefined) {
-        throw new Error(
-          'THREE.GLTFLoader: Image ' +
-            textureIndex +
-            ' is missing URI and bufferView'
-        );
-      }
-
-      const promise = Promise.resolve(sourceURI)
-        .then(function (sourceURI) {
-          return new Promise(function (resolve, reject) {
-            let onLoad = resolve;
-
-            if (loader.isImageBitmapLoader === true) {
-              onLoad = function (imageBitmap) {
-                const texture = new THREE.Texture(imageBitmap);
-                texture.needsUpdate = true;
-                resolve(texture);
-              };
-            }
-
-            loader.load(
-              resolveURL(sourceURI, options.path),
-              onLoad,
-              undefined,
-              reject
-            );
-          });
-        })
+      const promise = this.loadImageSource(sourceIndex, loader)
         .then(function (texture) {
-          // Clean up resources and configure THREE.Texture.
-          if (isObjectURL === true) {
-            URL.revokeObjectURL(sourceURI);
-          }
-
           texture.flipY = false;
           if (textureDef.name) texture.name = textureDef.name;
           const samplers = json.samplers || {};
@@ -2410,10 +2371,86 @@
           return texture;
         })
         .catch(function () {
-          console.error("THREE.GLTFLoader: Couldn't load texture", sourceURI);
           return null;
         });
       this.textureCache[cacheKey] = promise;
+      return promise;
+    }
+
+    loadImageSource(sourceIndex, loader) {
+      const parser = this;
+      const json = this.json;
+      const options = this.options;
+
+      if (this.sourceCache[sourceIndex] !== undefined) {
+        return this.sourceCache[sourceIndex]
+          .then(function (texture) {
+            return texture.clone();
+          })
+          .catch(function (error) {
+            throw error;
+          });
+      }
+
+      const sourceDef = json.images[sourceIndex];
+      const URL = self.URL || self.webkitURL;
+      let sourceURI = sourceDef.uri || '';
+      let isObjectURL = false;
+
+      if (sourceDef.bufferView !== undefined) {
+        // Load binary image data from bufferView, if provided.
+        sourceURI = parser
+          .getDependency('bufferView', sourceDef.bufferView)
+          .then(function (bufferView) {
+            isObjectURL = true;
+            const blob = new Blob([bufferView], {
+              type: sourceDef.mimeType,
+            });
+            sourceURI = URL.createObjectURL(blob);
+            return sourceURI;
+          });
+      } else if (sourceDef.uri === undefined) {
+        throw new Error(
+          'THREE.GLTFLoader: Image ' +
+            sourceIndex +
+            ' is missing URI and bufferView'
+        );
+      }
+
+      const promise = Promise.resolve(sourceURI)
+        .then(function (sourceURI) {
+          return new Promise(function (resolve, reject) {
+            let onLoad = resolve;
+
+            if (loader.isImageBitmapLoader === true) {
+              onLoad = function (imageBitmap) {
+                const texture = new THREE.Texture(imageBitmap);
+                texture.needsUpdate = true;
+                resolve(texture);
+              };
+            }
+
+            loader.load(
+              THREE.LoaderUtils.resolveURL(sourceURI, options.path),
+              onLoad,
+              undefined,
+              reject
+            );
+          });
+        })
+        .then(function (texture) {
+          // Clean up resources and configure THREE.Texture.
+          if (isObjectURL === true) {
+            URL.revokeObjectURL(sourceURI);
+          }
+
+          return texture;
+        })
+        .catch(function (error) {
+          console.error("THREE.GLTFLoader: Couldn't load texture", sourceURI);
+          throw error;
+        });
+      this.sourceCache[sourceIndex] = promise;
       return promise;
     }
     /**
@@ -2660,7 +2697,6 @@
 
         materialParams.depthWrite = false;
       } else {
-        materialParams.format = THREE.RGBFormat;
         materialParams.transparent = false;
 
         if (alphaMode === ALPHA_MODES.MASK) {
@@ -3095,9 +3131,8 @@
           const targetNames = [];
 
           if (PATH_PROPERTIES[target.path] === PATH_PROPERTIES.weights) {
-            // Node may be a THREE.Group (glTF mesh with several primitives) or a THREE.Mesh.
             node.traverse(function (object) {
-              if (object.isMesh === true && object.morphTargetInfluences) {
+              if (object.morphTargetInfluences) {
                 targetNames.push(object.name ? object.name : object.uuid);
               }
             });
